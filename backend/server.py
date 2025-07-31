@@ -194,10 +194,15 @@ async def create_game(data: CreateGame):
     
     await games_collection.insert_one(game)
     
+    # Remove MongoDB ObjectId for JSON serialization
+    game_response = dict(game)
+    if '_id' in game_response:
+        del game_response['_id']
+    
     return {
         'success': True,
         'game_code': game_code,
-        'game': game
+        'game': game_response
     }
 
 @api_router.post("/games/{game_code}/questions")
