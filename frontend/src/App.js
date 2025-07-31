@@ -6,8 +6,18 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Confetti from 'react-confetti';
 import './App.css';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+// Backend URL configuration - use local Docker backend
+// In Docker environment, this will be set by environment variables
+// In development, fallback to localhost
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 
+                   (window.location.hostname === 'localhost' ? 'http://localhost:8001' : 'http://localhost:8001');
 const API = `${BACKEND_URL}/api`;
+
+// Log the backend URL for debugging
+console.log('Environment:', process.env.NODE_ENV);
+console.log('Backend URL:', BACKEND_URL);
+console.log('API URL:', API);
+console.log('Current hostname:', window.location.hostname);
 
 // Polling-based real-time communication manager
 class PollingManager {
