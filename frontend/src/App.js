@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, useParams } from 'react-router-dom';
-import { io } from 'socket.io-client';
 import axios from 'axios';
 import toast, { Toaster } from 'react-hot-toast';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -9,17 +8,107 @@ import './App.css';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+const WS_URL = BACKEND_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
-// Socket connection
-let socket = null;
+// WebSocket connection manager
+class WebSocketManager {
+  constructor() {
+    this.ws = null;
+    this.connectionId = null;
+    this.messageHandlers = new Map();
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 5;
+  }
 
-const connectSocket = () => {
-  if (!socket) {
-    socket = io(BACKEND_URL, {
-      transports: ['websocket', 'polling']
+  connect() {
+    return new Promise((resolve, reject) => {
+      try {
+        this.connectionId = `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        this.ws = new WebSocket(`${WS_URL}/ws/${this.connectionId}`);
+
+        this.ws.onopen = () => {
+          console.log('WebSocket connected');
+          this.reconnectAttempts = 0;
+          resolve();
+        };
+
+        this.ws.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            this.handleMessage(message);
+          } catch (error) {
+            console.error('Error parsing WebSocket message:', error);
+          }
+        };
+
+        this.ws.onclose = () => {
+          console.log('WebSocket disconnected');
+          this.attemptReconnect();
+        };
+
+        this.ws.onerror = (error) => {
+          console.error('WebSocket error:', error);
+          reject(error);
+        };
+      } catch (error) {
+        reject(error);
+      }
     });
   }
-  return socket;
+
+  attemptReconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      console.log(`Attempting to reconnect... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+      
+      setTimeout(() => {
+        this.connect().catch(() => {
+          console.log('Reconnection failed');
+        });
+      }, 2000 * this.reconnectAttempts);
+    }
+  }
+
+  send(type, data) {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type, data }));
+    } else {
+      console.error('WebSocket is not connected');
+    }
+  }
+
+  on(type, handler) {
+    this.messageHandlers.set(type, handler);
+  }
+
+  off(type) {
+    this.messageHandlers.delete(type);
+  }
+
+  handleMessage(message) {
+    const handler = this.messageHandlers.get(message.type);
+    if (handler) {
+      handler(message.data);
+    }
+  }
+
+  disconnect() {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.messageHandlers.clear();
+  }
+}
+
+// Global WebSocket instance
+let wsManager = null;
+
+const getWebSocketManager = () => {
+  if (!wsManager) {
+    wsManager = new WebSocketManager();
+  }
+  return wsManager;
 };
 
 // Home Page
@@ -153,7 +242,7 @@ const OrganizerLogin = () => {
         navigate('/organizer/dashboard');
       }
     } catch (error) {
-      toast.error(error.response?.data?.error || 'Login failed');
+      toast.error(error.response?.data?.detail || 'Login failed');
     } finally {
       setIsLoading(false);
     }
@@ -360,6 +449,387 @@ const OrganizerDashboard = () => {
   );
 };
 
+// Game Management (Organizer)
+const GameManagement = () => {
+  const { code } = useParams();
+  const navigate = useNavigate();
+  const [game, setGame] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [participants, setParticipants] = useState([]);
+  const [showAddQuestion, setShowAddQuestion] = useState(false);
+  const [newQuestion, setNewQuestion] = useState({
+    type: 'MCQ',
+    text: '',
+    options: ['', '', '', ''],
+    correct_answer: '',
+    hint: '',
+    image_url: ''
+  });
+
+  const organizerId = localStorage.getItem('organizer_id');
+
+  useEffect(() => {
+    if (!organizerId) {
+      navigate('/organizer');
+      return;
+    }
+
+    fetchGameData();
+    setupWebSocket();
+  }, [code, organizerId, navigate]);
+
+  const fetchGameData = async () => {
+    try {
+      const [gameRes, questionsRes, participantsRes] = await Promise.all([
+        axios.get(`${API}/games/${code}`),
+        axios.get(`${API}/games/${code}/questions`),
+        axios.get(`${API}/games/${code}/participants`)
+      ]);
+
+      if (gameRes.data.success) {
+        setGame(gameRes.data.game);
+      }
+      if (questionsRes.data.success) {
+        setQuestions(questionsRes.data.questions);
+      }
+      if (participantsRes.data.success) {
+        setParticipants(participantsRes.data.participants);
+      }
+    } catch (error) {
+      toast.error('Failed to load game data');
+    }
+  };
+
+  const setupWebSocket = async () => {
+    try {
+      const ws = getWebSocketManager();
+      await ws.connect();
+
+      ws.on('participant_joined', (data) => {
+        setParticipants(prev => [...prev, data.participant]);
+        toast.success(`${data.participant.name} joined the game`);
+      });
+
+      ws.on('answer_received', (data) => {
+        toast.info(`Answer received from participant`);
+      });
+
+      ws.on('cheat_detected', (data) => {
+        toast.error(`Cheat detected: ${data.type} (Penalty: -${data.penalty})`);
+      });
+
+      // Join admin room
+      ws.send('join_admin', {
+        game_code: code,
+        organizer_id: organizerId
+      });
+
+    } catch (error) {
+      console.error('WebSocket connection failed:', error);
+      toast.error('Real-time connection failed');
+    }
+  };
+
+  const addQuestion = async (e) => {
+    e.preventDefault();
+    
+    try {
+      const response = await axios.post(`${API}/games/${code}/questions`, {
+        ...newQuestion,
+        order: questions.length + 1
+      });
+
+      if (response.data.success) {
+        setQuestions(prev => [...prev, response.data.question]);
+        setShowAddQuestion(false);
+        setNewQuestion({
+          type: 'MCQ',
+          text: '',
+          options: ['', '', '', ''],
+          correct_answer: '',
+          hint: '',
+          image_url: ''
+        });
+        toast.success('Question added successfully!');
+      }
+    } catch (error) {
+      toast.error('Failed to add question');
+    }
+  };
+
+  const startGame = async () => {
+    try {
+      const response = await axios.post(`${API}/games/${code}/start`);
+      if (response.data.success) {
+        setGame(prev => ({ ...prev, status: 'in_progress' }));
+        toast.success('Game started!');
+      }
+    } catch (error) {
+      toast.error('Failed to start game');
+    }
+  };
+
+  if (!game) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
+        <div className="text-white text-center">
+          <div className="animate-spin w-12 h-12 border-4 border-cyan-400 border-t-transparent rounded-full mx-auto mb-4"></div>
+          <p>Loading game...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-4">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="flex justify-between items-center mb-8">
+          <div>
+            <h1 className="text-3xl font-bold text-white">{game.title}</h1>
+            <p className="text-gray-300">Code: {game.code} | Status: {game.status}</p>
+          </div>
+          <div className="flex space-x-4">
+            {game.status === 'waiting' && questions.length > 0 && (
+              <button
+                onClick={startGame}
+                className="px-6 py-3 rounded-lg bg-gradient-to-r from-green-500 to-blue-500 text-white font-semibold hover:from-green-600 hover:to-blue-600 transition-all duration-300"
+              >
+                Start Game
+              </button>
+            )}
+            <button
+              onClick={() => navigate('/organizer/dashboard')}
+              className="px-4 py-2 rounded-lg bg-gray-500 text-white hover:bg-gray-600 transition-colors"
+            >
+              Back to Dashboard
+            </button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          {/* Questions Section */}
+          <div className="bg-white/10 backdrop-blur-md rounded-xl p-6 border border-white/20">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold text-white">Questions ({questions.length})</h2>
+              <button
+                onClick={() => setShowAddQuestion(true)}
+                className="px-4 py-2 rounded-lg bg-cyan-500 text-white hover:bg-cyan-600 transition-colors"
+              >
+                + Add Question
+              </button>
+            </div>
+
+            {questions.length === 0 ? (
+              <p className="text-gray-400 text-center py-8">No questions added yet</p>
+            ) : (
+              <div className="space-y-4 max-h-96 overflow-y-auto">
+                {questions.map((question, index) => (
+                  <div key={question.id} className="bg-white/5 rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <span className="text-xs text-cyan-400 font-semibold">{question.type}</span>
+                        <h3 className="text-white font-medium">{index + 1}. {question.text}</h3>
+                        {question.type === 'MCQ' && (
+                          <ul className="text-sm text-gray-400 mt-2">
+                            {question.options.map((option, i) => (
+                              <li key={i} className={option === question.correct_answer ? 'text-green-400' : ''}>
+                                {String.fromCharCode(65 + i)}. {option}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {(question.type === 'INPUT' || question.type === 'TRUE_FALSE' || question.type === 'SCRAMBLED') && (
+                          <p className="text-sm text-green-400 mt-2">Answer: {question.correct_answer}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Participants Section */}
+          <div className="bg-white/10 backdrop-blur-md rounded-xl p-6 border border-white/20">
+            <h2 className="text-xl font-semibold text-white mb-4">Participants ({participants.length})</h2>
+            
+            {participants.length === 0 ? (
+              <p className="text-gray-400 text-center py-8">No participants yet</p>
+            ) : (
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {participants.map((participant) => (
+                  <div key={participant.id} className="bg-white/5 rounded-lg p-4 border border-white/10">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-3">
+                        <img
+                          src={participant.avatar}
+                          alt="Avatar"
+                          className="w-10 h-10 rounded-full border-2 border-cyan-400"
+                        />
+                        <div>
+                          <h3 className="text-white font-medium">{participant.name}</h3>
+                          <p className="text-sm text-gray-400">Score: {participant.total_score}</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs text-gray-400">
+                          Answers: {participant.answers?.length || 0}
+                        </p>
+                        {participant.cheat_flags && (
+                          <p className="text-xs text-red-400">
+                            Violations: {Object.values(participant.cheat_flags).reduce((a, b) => a + b, 0)}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Add Question Modal */}
+        <AnimatePresence>
+          {showAddQuestion && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+            >
+              <motion.div
+                initial={{ scale: 0.8, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.8, opacity: 0 }}
+                className="bg-white/10 backdrop-blur-md rounded-2xl p-6 border border-white/20 max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+              >
+                <h2 className="text-2xl font-bold text-white mb-6">Add New Question</h2>
+                
+                <form onSubmit={addQuestion} className="space-y-4">
+                  <div>
+                    <label className="block text-white font-medium mb-2">Question Type</label>
+                    <select
+                      value={newQuestion.type}
+                      onChange={(e) => setNewQuestion(prev => ({ 
+                        ...prev, 
+                        type: e.target.value,
+                        options: e.target.value === 'MCQ' ? ['', '', '', ''] : [],
+                        correct_answer: ''
+                      }))}
+                      className="w-full px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                    >
+                      <option value="MCQ">Multiple Choice</option>
+                      <option value="TRUE_FALSE">True/False</option>
+                      <option value="INPUT">Text Input</option>
+                      <option value="SCRAMBLED">Scrambled Word</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-white font-medium mb-2">Question Text</label>
+                    <textarea
+                      value={newQuestion.text}
+                      onChange={(e) => setNewQuestion(prev => ({ ...prev, text: e.target.value }))}
+                      className="w-full px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                      rows="3"
+                      required
+                    />
+                  </div>
+
+                  {newQuestion.type === 'MCQ' && (
+                    <div>
+                      <label className="block text-white font-medium mb-2">Options</label>
+                      {newQuestion.options.map((option, index) => (
+                        <input
+                          key={index}
+                          type="text"
+                          placeholder={`Option ${String.fromCharCode(65 + index)}`}
+                          value={option}
+                          onChange={(e) => {
+                            const newOptions = [...newQuestion.options];
+                            newOptions[index] = e.target.value;
+                            setNewQuestion(prev => ({ ...prev, options: newOptions }));
+                          }}
+                          className="w-full px-4 py-2 rounded-lg bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-400 mb-2"
+                          required
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-white font-medium mb-2">Correct Answer</label>
+                    {newQuestion.type === 'MCQ' ? (
+                      <select
+                        value={newQuestion.correct_answer}
+                        onChange={(e) => setNewQuestion(prev => ({ ...prev, correct_answer: e.target.value }))}
+                        className="w-full px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                        required
+                      >
+                        <option value="">Select correct option</option>
+                        {newQuestion.options.map((option, index) => (
+                          <option key={index} value={option}>{String.fromCharCode(65 + index)}. {option}</option>
+                        ))}
+                      </select>
+                    ) : newQuestion.type === 'TRUE_FALSE' ? (
+                      <select
+                        value={newQuestion.correct_answer}
+                        onChange={(e) => setNewQuestion(prev => ({ ...prev, correct_answer: e.target.value }))}
+                        className="w-full px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                        required
+                      >
+                        <option value="">Select answer</option>
+                        <option value="True">True</option>
+                        <option value="False">False</option>
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={newQuestion.correct_answer}
+                        onChange={(e) => setNewQuestion(prev => ({ ...prev, correct_answer: e.target.value }))}
+                        className="w-full px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                        required
+                      />
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block text-white font-medium mb-2">Hint (Optional)</label>
+                    <input
+                      type="text"
+                      value={newQuestion.hint}
+                      onChange={(e) => setNewQuestion(prev => ({ ...prev, hint: e.target.value }))}
+                      className="w-full px-4 py-3 rounded-lg bg-white/10 border border-white/20 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-cyan-400"
+                    />
+                  </div>
+
+                  <div className="flex space-x-4 pt-4">
+                    <button
+                      type="submit"
+                      className="flex-1 py-3 rounded-lg bg-gradient-to-r from-green-500 to-blue-500 text-white font-semibold hover:from-green-600 hover:to-blue-600 transition-all duration-300"
+                    >
+                      Add Question
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddQuestion(false)}
+                      className="flex-1 py-3 rounded-lg bg-gray-500 text-white font-semibold hover:bg-gray-600 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </div>
+  );
+};
+
 // Game Lobby (Participant)
 const GameLobby = () => {
   const { code } = useParams();
@@ -371,45 +841,47 @@ const GameLobby = () => {
   const [isJoining, setIsJoining] = useState(false);
 
   useEffect(() => {
-    if (!socket) {
-      socket = connectSocket();
-    }
-
-    // Socket event listeners
-    socket.on('joined_game', (data) => {
-      if (data.success) {
-        setParticipant(data.participant);
-        setGame(data.game);
-        toast.success('Joined game successfully!');
-      }
-    });
-
-    socket.on('game_started', (data) => {
-      setGameStarted(true);
-      toast.success('Game has started!');
-    });
-
-    socket.on('error', (data) => {
-      toast.error(data.message);
-      setIsJoining(false);
-    });
-
-    return () => {
-      if (socket) {
-        socket.off('joined_game');
-        socket.off('game_started');
-        socket.off('error');
-      }
-    };
+    setupWebSocket();
   }, []);
+
+  const setupWebSocket = async () => {
+    try {
+      const ws = getWebSocketManager();
+      await ws.connect();
+
+      ws.on('joined_game', (data) => {
+        if (data.success) {
+          setParticipant(data.participant);
+          setGame(data.game);
+          toast.success('Joined game successfully!');
+          setIsJoining(false);
+        }
+      });
+
+      ws.on('game_started', (data) => {
+        setGameStarted(true);
+        toast.success('Game has started!');
+      });
+
+      ws.on('error', (data) => {
+        toast.error(data.message);
+        setIsJoining(false);
+      });
+
+    } catch (error) {
+      toast.error('Failed to connect to game server');
+    }
+  };
 
   // Anti-cheat detection
   useEffect(() => {
     if (!participant) return;
 
+    const ws = getWebSocketManager();
+
     const handleVisibilityChange = () => {
       if (document.hidden && participant) {
-        socket.emit('cheat_detected', {
+        ws.send('cheat_detected', {
           participant_id: participant.id,
           type: 'TAB_SWITCH'
         });
@@ -422,7 +894,7 @@ const GameLobby = () => {
         e.key === 'F12'
       )) {
         e.preventDefault();
-        socket.emit('cheat_detected', {
+        ws.send('cheat_detected', {
           participant_id: participant.id,
           type: 'DEV_TOOLS'
         });
@@ -432,7 +904,7 @@ const GameLobby = () => {
     const handleContextMenu = (e) => {
       if (participant) {
         e.preventDefault();
-        socket.emit('cheat_detected', {
+        ws.send('cheat_detected', {
           participant_id: participant.id,
           type: 'COPY_ATTEMPT'
         });
@@ -454,14 +926,15 @@ const GameLobby = () => {
     e.preventDefault();
     if (participantName.trim()) {
       setIsJoining(true);
-      socket.emit('join_game', {
+      const ws = getWebSocketManager();
+      ws.send('join_game', {
         game_code: code,
         name: participantName.trim()
       });
     }
   };
 
-  if (gameStarted && participant) {
+  if (gameStarted && participant && game) {
     return <QuizGame participant={participant} game={game} />;
   }
 
@@ -563,34 +1036,10 @@ const QuizGame = ({ participant, game }) => {
     };
 
     fetchQuestions();
-  }, [game.code]);
-
-  // Timer effect
-  useEffect(() => {
-    if (timeLeft > 0 && !isSubmitting && !gameCompleted) {
-      const timer = setTimeout(() => setTimeLeft(timeLeft - 1), 1000);
-      return () => clearTimeout(timer);
-    } else if (timeLeft === 0 && !isSubmitting) {
-      submitAnswer();
-    }
-  }, [timeLeft, isSubmitting, gameCompleted]);
-
-  const submitAnswer = async () => {
-    if (isSubmitting) return;
     
-    setIsSubmitting(true);
-    const timeTaken = 30 - timeLeft;
-
-    socket.emit('submit_answer', {
-      participant_id: participant.id,
-      question_id: currentQuestion.id,
-      answer: selectedAnswer,
-      time_taken: timeTaken,
-      used_hint: usedHint
-    });
-
-    // Listen for response
-    socket.once('answer_submitted', (data) => {
+    // Setup WebSocket listener for answer submission response
+    const ws = getWebSocketManager();
+    ws.on('answer_submitted', (data) => {
       if (data.success) {
         toast.success(`${data.is_correct ? 'Correct!' : 'Incorrect'} Score: ${data.score}`);
         
@@ -608,6 +1057,33 @@ const QuizGame = ({ participant, game }) => {
           }
         }, 2000);
       }
+    });
+
+  }, [game.code, currentQuestionIndex, questions.length]);
+
+  // Timer effect
+  useEffect(() => {
+    if (timeLeft > 0 && !isSubmitting && !gameCompleted && currentQuestion) {
+      const timer = setTimeout(() => setTimeLeft(timeLeft - 1), 1000);
+      return () => clearTimeout(timer);
+    } else if (timeLeft === 0 && !isSubmitting && currentQuestion) {
+      submitAnswer();
+    }
+  }, [timeLeft, isSubmitting, gameCompleted, currentQuestion]);
+
+  const submitAnswer = async () => {
+    if (isSubmitting || !currentQuestion) return;
+    
+    setIsSubmitting(true);
+    const timeTaken = 30 - timeLeft;
+
+    const ws = getWebSocketManager();
+    ws.send('submit_answer', {
+      participant_id: participant.id,
+      question_id: currentQuestion.id,
+      answer: selectedAnswer,
+      time_taken: timeTaken,
+      used_hint: usedHint
     });
   };
 
@@ -839,6 +1315,172 @@ const GameCompleted = ({ participant }) => {
   );
 };
 
+// Live Leaderboard
+const LiveLeaderboard = () => {
+  const { code } = useParams();
+  const [game, setGame] = useState(null);
+  const [leaderboard, setLeaderboard] = useState([]);
+
+  useEffect(() => {
+    fetchGameData();
+    setupWebSocket();
+  }, [code]);
+
+  const fetchGameData = async () => {
+    try {
+      const [gameRes, leaderboardRes] = await Promise.all([
+        axios.get(`${API}/games/${code}`),
+        axios.get(`${API}/games/${code}/leaderboard`)
+      ]);
+
+      if (gameRes.data.success) {
+        setGame(gameRes.data.game);
+      }
+      if (leaderboardRes.data.success) {
+        setLeaderboard(leaderboardRes.data.leaderboard);
+      }
+    } catch (error) {
+      toast.error('Failed to load game data');
+    }
+  };
+
+  const setupWebSocket = async () => {
+    try {
+      const ws = getWebSocketManager();
+      await ws.connect();
+
+      ws.on('leaderboard_update', (data) => {
+        setLeaderboard(prev => {
+          const updated = prev.map(p => 
+            p.id === data.participant.id ? data.participant : p
+          );
+          return updated.sort((a, b) => b.total_score - a.total_score);
+        });
+      });
+
+      ws.on('live_joined', (data) => {
+        if (data.success) {
+          setGame(data.game);
+          setLeaderboard(data.leaderboard);
+        }
+      });
+
+      ws.send('join_live', { game_code: code });
+
+    } catch (error) {
+      console.error('WebSocket connection failed:', error);
+      toast.error('Real-time connection failed');
+    }
+  };
+
+  if (!game) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center">
+        <div className="text-white text-center">
+          <div className="animate-spin w-12 h-12 border-4 border-cyan-400 border-t-transparent rounded-full mx-auto mb-4"></div>
+          <p>Loading leaderboard...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 p-4">
+      <div className="max-w-4xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <h1 className="text-4xl font-bold text-white mb-2">🏆 Live Leaderboard</h1>
+          <p className="text-xl text-gray-300">{game.title}</p>
+          <p className="text-lg text-cyan-400">Game Code: {game.code}</p>
+          <div className="mt-4">
+            <span className={`px-4 py-2 rounded-full text-sm font-semibold ${
+              game.status === 'waiting' ? 'bg-yellow-500/20 text-yellow-400' :
+              game.status === 'in_progress' ? 'bg-green-500/20 text-green-400' :
+              'bg-blue-500/20 text-blue-400'
+            }`}>
+              {game.status.replace('_', ' ').toUpperCase()}
+            </span>
+          </div>
+        </div>
+
+        {/* Leaderboard */}
+        <div className="bg-white/10 backdrop-blur-md rounded-2xl p-6 shadow-2xl border border-white/20">
+          <h2 className="text-2xl font-bold text-white mb-6 text-center">
+            Rankings ({leaderboard.length} participants)
+          </h2>
+          
+          {leaderboard.length === 0 ? (
+            <p className="text-gray-400 text-center py-12">No participants yet</p>
+          ) : (
+            <div className="space-y-3">
+              {leaderboard.map((participant, index) => (
+                <motion.div
+                  key={participant.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: index * 0.1 }}
+                  className={`p-4 rounded-lg border-2 transition-all duration-300 ${
+                    index === 0 ? 'border-yellow-400 bg-yellow-400/10' :
+                    index === 1 ? 'border-gray-400 bg-gray-400/10' :
+                    index === 2 ? 'border-orange-400 bg-orange-400/10' :
+                    'border-white/20 bg-white/5'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <div className="text-center">
+                        <span className={`text-2xl font-bold ${
+                          index === 0 ? 'text-yellow-400' :
+                          index === 1 ? 'text-gray-400' :
+                          index === 2 ? 'text-orange-400' :
+                          'text-white'
+                        }`}>
+                          #{index + 1}
+                        </span>
+                        {index < 3 && (
+                          <div className="text-xl">
+                            {index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉'}
+                          </div>
+                        )}
+                      </div>
+                      
+                      <img
+                        src={participant.avatar}
+                        alt="Avatar"
+                        className="w-12 h-12 rounded-full border-2 border-cyan-400"
+                      />
+                      
+                      <div>
+                        <h3 className="text-lg font-bold text-white">{participant.name}</h3>
+                        <p className="text-sm text-gray-400">
+                          Answers: {participant.answers?.length || 0}
+                        </p>
+                      </div>
+                    </div>
+                    
+                    <div className="text-right">
+                      <p className="text-2xl font-bold text-cyan-400">
+                        {participant.total_score}
+                      </p>
+                      <p className="text-xs text-gray-400">points</p>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+        
+        <div className="text-center mt-8">
+          <p className="text-gray-400">
+            Updates automatically • Refresh not needed
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Main App Component
 function App() {
   return (
@@ -848,7 +1490,9 @@ function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/organizer" element={<OrganizerLogin />} />
           <Route path="/organizer/dashboard" element={<OrganizerDashboard />} />
+          <Route path="/organizer/game/:code" element={<GameManagement />} />
           <Route path="/game/:code" element={<GameLobby />} />
+          <Route path="/live/:code" element={<LiveLeaderboard />} />
         </Routes>
       </BrowserRouter>
       <Toaster position="top-right" />
