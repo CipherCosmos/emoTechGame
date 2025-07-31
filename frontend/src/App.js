@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import toast, { Toaster } from 'react-hot-toast';
@@ -794,7 +794,7 @@ const GameLobby = () => {
 
     const handleVisibilityChange = () => {
       if (document.hidden && participant) {
-        // Send cheat detection via API instead of WebSocket
+        // Send cheat detection via API
         axios.post(`${API}/cheat-detected`, {
           participant_id: participant.id,
           type: 'TAB_SWITCH'
@@ -949,6 +949,7 @@ const QuizGame = ({ participant, game }) => {
   const [usedHint, setUsedHint] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [gameCompleted, setGameCompleted] = useState(false);
+  const [updatedParticipant, setUpdatedParticipant] = useState(participant);
 
   const currentQuestion = questions[currentQuestionIndex];
 
@@ -966,30 +967,7 @@ const QuizGame = ({ participant, game }) => {
     };
 
     fetchQuestions();
-    
-    // Setup WebSocket listener for answer submission response
-    const ws = getWebSocketManager();
-    ws.on('answer_submitted', (data) => {
-      if (data.success) {
-        toast.success(`${data.is_correct ? 'Correct!' : 'Incorrect'} Score: ${data.score}`);
-        
-        // Move to next question or complete game
-        setTimeout(() => {
-          if (currentQuestionIndex < questions.length - 1) {
-            setCurrentQuestionIndex(currentQuestionIndex + 1);
-            setSelectedAnswer('');
-            setShowHint(false);
-            setUsedHint(false);
-            setTimeLeft(30);
-            setIsSubmitting(false);
-          } else {
-            setGameCompleted(true);
-          }
-        }, 2000);
-      }
-    });
-
-  }, [game.code, currentQuestionIndex, questions.length]);
+  }, [game.code]);
 
   // Timer effect
   useEffect(() => {
@@ -1007,14 +985,42 @@ const QuizGame = ({ participant, game }) => {
     setIsSubmitting(true);
     const timeTaken = 30 - timeLeft;
 
-    const ws = getWebSocketManager();
-    ws.send('submit_answer', {
-      participant_id: participant.id,
-      question_id: currentQuestion.id,
-      answer: selectedAnswer,
-      time_taken: timeTaken,
-      used_hint: usedHint
-    });
+    try {
+      const response = await axios.post(`${API}/answers`, {
+        participant_id: updatedParticipant.id,
+        question_id: currentQuestion.id,
+        answer: selectedAnswer,
+        time_taken: timeTaken,
+        used_hint: usedHint
+      });
+
+      if (response.data.success) {
+        toast.success(`${response.data.is_correct ? 'Correct!' : 'Incorrect'} Score: ${response.data.score}`);
+        
+        // Update participant score
+        setUpdatedParticipant(prev => ({
+          ...prev,
+          total_score: response.data.total_score
+        }));
+        
+        // Move to next question or complete game
+        setTimeout(() => {
+          if (currentQuestionIndex < questions.length - 1) {
+            setCurrentQuestionIndex(currentQuestionIndex + 1);
+            setSelectedAnswer('');
+            setShowHint(false);
+            setUsedHint(false);
+            setTimeLeft(30);
+            setIsSubmitting(false);
+          } else {
+            setGameCompleted(true);
+          }
+        }, 2000);
+      }
+    } catch (error) {
+      toast.error('Failed to submit answer');
+      setIsSubmitting(false);
+    }
   };
 
   const renderQuestion = () => {
@@ -1083,7 +1089,7 @@ const QuizGame = ({ participant, game }) => {
   };
 
   if (gameCompleted) {
-    return <GameCompleted participant={participant} />;
+    return <GameCompleted participant={updatedParticipant} />;
   }
 
   if (!currentQuestion) {
@@ -1163,9 +1169,9 @@ const QuizGame = ({ participant, game }) => {
 
           <div className="mt-6 flex justify-between items-center">
             <div className="text-gray-400">
-              <span className="font-semibold text-white">{participant.name}</span>
+              <span className="font-semibold text-white">{updatedParticipant.name}</span>
               <br />
-              Current Score: {participant.total_score}
+              Current Score: {updatedParticipant.total_score}
             </div>
             
             <motion.button
@@ -1253,7 +1259,22 @@ const LiveLeaderboard = () => {
 
   useEffect(() => {
     fetchGameData();
-    setupWebSocket();
+    
+    // Poll for leaderboard updates
+    pollingManager.startPolling('leaderboard', async () => {
+      try {
+        const response = await axios.get(`${API}/games/${code}/leaderboard`);
+        if (response.data.success) {
+          setLeaderboard(response.data.leaderboard);
+        }
+      } catch (error) {
+        console.error('Error fetching leaderboard:', error);
+      }
+    }, 3000);
+
+    return () => {
+      pollingManager.stopPolling('leaderboard');
+    };
   }, [code]);
 
   const fetchGameData = async () => {
@@ -1271,35 +1292,6 @@ const LiveLeaderboard = () => {
       }
     } catch (error) {
       toast.error('Failed to load game data');
-    }
-  };
-
-  const setupWebSocket = async () => {
-    try {
-      const ws = getWebSocketManager();
-      await ws.connect();
-
-      ws.on('leaderboard_update', (data) => {
-        setLeaderboard(prev => {
-          const updated = prev.map(p => 
-            p.id === data.participant.id ? data.participant : p
-          );
-          return updated.sort((a, b) => b.total_score - a.total_score);
-        });
-      });
-
-      ws.on('live_joined', (data) => {
-        if (data.success) {
-          setGame(data.game);
-          setLeaderboard(data.leaderboard);
-        }
-      });
-
-      ws.send('join_live', { game_code: code });
-
-    } catch (error) {
-      console.error('WebSocket connection failed:', error);
-      toast.error('Real-time connection failed');
     }
   };
 

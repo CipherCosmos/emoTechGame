@@ -1,12 +1,10 @@
-from fastapi import FastAPI, APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 import os
 import uuid
-import json
-import asyncio
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any
 import logging
@@ -24,83 +22,6 @@ db = client[os.environ['DB_NAME']]
 # FastAPI app
 app = FastAPI(title="Emotech Quiz Game API")
 api_router = APIRouter(prefix="/api")
-
-# WebSocket connection manager
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.game_rooms: Dict[str, List[str]] = {}
-        self.admin_connections: Dict[str, List[str]] = {}
-        self.live_connections: Dict[str, List[str]] = {}
-
-    async def connect(self, websocket: WebSocket, connection_id: str):
-        await websocket.accept()
-        self.active_connections[connection_id] = websocket
-
-    def disconnect(self, connection_id: str):
-        if connection_id in self.active_connections:
-            del self.active_connections[connection_id]
-        
-        # Remove from all rooms
-        for game_code in list(self.game_rooms.keys()):
-            if connection_id in self.game_rooms[game_code]:
-                self.game_rooms[game_code].remove(connection_id)
-                if not self.game_rooms[game_code]:
-                    del self.game_rooms[game_code]
-        
-        for game_code in list(self.admin_connections.keys()):
-            if connection_id in self.admin_connections[game_code]:
-                self.admin_connections[game_code].remove(connection_id)
-                if not self.admin_connections[game_code]:
-                    del self.admin_connections[game_code]
-        
-        for game_code in list(self.live_connections.keys()):
-            if connection_id in self.live_connections[game_code]:
-                self.live_connections[game_code].remove(connection_id)
-                if not self.live_connections[game_code]:
-                    del self.live_connections[game_code]
-
-    def join_game_room(self, connection_id: str, game_code: str):
-        if game_code not in self.game_rooms:
-            self.game_rooms[game_code] = []
-        if connection_id not in self.game_rooms[game_code]:
-            self.game_rooms[game_code].append(connection_id)
-
-    def join_admin_room(self, connection_id: str, game_code: str):
-        if game_code not in self.admin_connections:
-            self.admin_connections[game_code] = []
-        if connection_id not in self.admin_connections[game_code]:
-            self.admin_connections[game_code].append(connection_id)
-
-    def join_live_room(self, connection_id: str, game_code: str):
-        if game_code not in self.live_connections:
-            self.live_connections[game_code] = []
-        if connection_id not in self.live_connections[game_code]:
-            self.live_connections[game_code].append(connection_id)
-
-    async def send_to_connection(self, connection_id: str, message: dict):
-        if connection_id in self.active_connections:
-            try:
-                await self.active_connections[connection_id].send_text(json.dumps(message))
-            except:
-                self.disconnect(connection_id)
-
-    async def broadcast_to_game(self, game_code: str, message: dict):
-        if game_code in self.game_rooms:
-            for connection_id in self.game_rooms[game_code].copy():
-                await self.send_to_connection(connection_id, message)
-
-    async def broadcast_to_admin(self, game_code: str, message: dict):
-        if game_code in self.admin_connections:
-            for connection_id in self.admin_connections[game_code].copy():
-                await self.send_to_connection(connection_id, message)
-
-    async def broadcast_to_live(self, game_code: str, message: dict):
-        if game_code in self.live_connections:
-            for connection_id in self.live_connections[game_code].copy():
-                await self.send_to_connection(connection_id, message)
-
-manager = ConnectionManager()
 
 # Database Collections
 organizers_collection = db.organizers
@@ -128,12 +49,21 @@ class CreateQuestion(BaseModel):
     hint: Optional[str] = None
     order: int = 1
 
+class CreateParticipant(BaseModel):
+    game_code: str
+    name: str
+
 class SubmitAnswer(BaseModel):
     participant_id: str
     question_id: str
     answer: Any
     time_taken: int = 0
     used_hint: bool = False
+
+class CheatDetection(BaseModel):
+    participant_id: str
+    type: str  # TAB_SWITCH, COPY_ATTEMPT, DEV_TOOLS
+    details: Dict = {}
 
 # Helper Functions
 def generate_game_code():
@@ -143,6 +73,12 @@ def generate_game_code():
 def get_current_timestamp():
     """Get current UTC timestamp"""
     return datetime.now(timezone.utc)
+
+def clean_mongodb_doc(doc):
+    """Remove MongoDB ObjectId for JSON serialization"""
+    if doc and '_id' in doc:
+        del doc['_id']
+    return doc
 
 # REST API Routes
 @api_router.get("/")
@@ -194,15 +130,10 @@ async def create_game(data: CreateGame):
     
     await games_collection.insert_one(game)
     
-    # Remove MongoDB ObjectId for JSON serialization
-    game_response = dict(game)
-    if '_id' in game_response:
-        del game_response['_id']
-    
     return {
         'success': True,
         'game_code': game_code,
-        'game': game_response
+        'game': clean_mongodb_doc(dict(game))
     }
 
 @api_router.post("/games/{game_code}/questions")
@@ -227,14 +158,9 @@ async def add_question(game_code: str, data: CreateQuestion):
     
     await questions_collection.insert_one(question)
     
-    # Remove MongoDB ObjectId for JSON serialization
-    question_response = dict(question)
-    if '_id' in question_response:
-        del question_response['_id']
-    
     return {
         'success': True,
-        'question': question_response
+        'question': clean_mongodb_doc(dict(question))
     }
 
 @api_router.get("/games/{game_code}/questions")
@@ -248,6 +174,49 @@ async def get_questions(game_code: str):
     return {
         'success': True,
         'questions': questions
+    }
+
+@api_router.post("/participants")
+async def create_participant(data: CreateParticipant):
+    """Create a participant for a game"""
+    # Check if game exists
+    game = await games_collection.find_one({'code': data.game_code})
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found")
+    
+    # Check if name is already taken
+    existing_participant = await participants_collection.find_one({
+        'game_code': data.game_code,
+        'name': data.name
+    })
+    
+    if existing_participant:
+        raise HTTPException(status_code=400, detail="Name already taken")
+    
+    # Create participant
+    participant_id = str(uuid.uuid4())
+    participant = {
+        'id': participant_id,
+        'game_code': data.game_code,
+        'name': data.name,
+        'avatar': f'https://api.dicebear.com/7.x/avataaars/svg?seed={data.name}',
+        'joined_at': get_current_timestamp(),
+        'total_score': 0,
+        'answers': [],
+        'cheat_flags': {
+            'tab_switches': 0,
+            'copy_attempts': 0,
+            'dev_tools_attempts': 0
+        },
+        'is_active': True
+    }
+    
+    await participants_collection.insert_one(participant)
+    
+    return {
+        'success': True,
+        'participant': clean_mongodb_doc(dict(participant)),
+        'game': clean_mongodb_doc(dict(game))
     }
 
 @api_router.post("/games/{game_code}/start")
@@ -267,15 +236,6 @@ async def start_game(game_code: str):
             }
         }
     )
-    
-    # Notify all connected participants
-    await manager.broadcast_to_game(game_code, {
-        'type': 'game_started',
-        'data': {
-            'game_code': game_code,
-            'message': 'Game has started!'
-        }
-    })
     
     return {'success': True}
 
@@ -317,271 +277,57 @@ async def get_leaderboard(game_code: str):
         'leaderboard': participants
     }
 
-# WebSocket endpoint
-@app.websocket("/ws/{connection_id}")
-async def websocket_endpoint(websocket: WebSocket, connection_id: str):
-    await manager.connect(websocket, connection_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            
-            await handle_websocket_message(connection_id, message)
-            
-    except WebSocketDisconnect:
-        manager.disconnect(connection_id)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-        manager.disconnect(connection_id)
-
-async def handle_websocket_message(connection_id: str, message: dict):
-    """Handle incoming WebSocket messages"""
-    message_type = message.get('type')
-    data = message.get('data', {})
-    
-    if message_type == 'join_game':
-        await handle_join_game(connection_id, data)
-    elif message_type == 'join_admin':
-        await handle_join_admin(connection_id, data)
-    elif message_type == 'join_live':
-        await handle_join_live(connection_id, data)
-    elif message_type == 'submit_answer':
-        await handle_submit_answer(connection_id, data)
-    elif message_type == 'cheat_detected':
-        await handle_cheat_detected(connection_id, data)
-
-async def handle_join_game(connection_id: str, data: dict):
-    """Handle participant joining a game"""
-    game_code = data.get('game_code')
-    participant_name = data.get('name')
-    
-    if not game_code or not participant_name:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Game code and name required'}
-        })
-        return
-    
-    # Check if game exists
-    game = await games_collection.find_one({'code': game_code})
-    if not game:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Game not found'}
-        })
-        return
-    
-    # Check if name is already taken
-    existing_participant = await participants_collection.find_one({
-        'game_code': game_code,
-        'name': participant_name
-    })
-    
-    if existing_participant:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Name already taken'}
-        })
-        return
-    
-    # Create participant
-    participant_id = str(uuid.uuid4())
-    participant = {
-        'id': participant_id,
-        'game_code': game_code,
-        'name': participant_name,
-        'avatar': f'https://api.dicebear.com/7.x/avataaars/svg?seed={participant_name}',
-        'connection_id': connection_id,
-        'joined_at': get_current_timestamp(),
-        'total_score': 0,
-        'answers': [],
-        'cheat_flags': {
-            'tab_switches': 0,
-            'copy_attempts': 0,
-            'dev_tools_attempts': 0
-        },
-        'is_active': True
-    }
-    
-    # Store in database
-    await participants_collection.insert_one(participant)
-    
-    # Remove MongoDB ObjectId for JSON serialization
-    participant_response = dict(participant)
-    if '_id' in participant_response:
-        del participant_response['_id']
-    
-    # Join game room
-    manager.join_game_room(connection_id, game_code)
-    
-    # Notify participant
-    await manager.send_to_connection(connection_id, {
-        'type': 'joined_game',
-        'data': {
-            'success': True,
-            'participant': participant_response,
-            'game': game
-        }
-    })
-    
-    # Notify admin
-    await manager.broadcast_to_admin(game_code, {
-        'type': 'participant_joined',
-        'data': {'participant': participant_response}
-    })
-
-async def handle_join_admin(connection_id: str, data: dict):
-    """Handle organizer joining admin room"""
-    game_code = data.get('game_code')
-    organizer_id = data.get('organizer_id')
-    
-    if not game_code or not organizer_id:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Game code and organizer ID required'}
-        })
-        return
-    
-    # Verify organizer owns this game
-    game = await games_collection.find_one({
-        'code': game_code,
-        'organizer_id': organizer_id
-    })
-    
-    if not game:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Access denied'}
-        })
-        return
-    
-    # Join admin room
-    manager.join_admin_room(connection_id, game_code)
-    
-    # Get current participants
-    participants = await participants_collection.find(
-        {'game_code': game_code},
-        {'_id': 0}
-    ).to_list(length=None)
-    
-    await manager.send_to_connection(connection_id, {
-        'type': 'admin_joined',
-        'data': {
-            'success': True,
-            'game': game,
-            'participants': participants
-        }
-    })
-
-async def handle_join_live(connection_id: str, data: dict):
-    """Handle public viewer joining live view"""
-    game_code = data.get('game_code')
-    
-    if not game_code:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Game code required'}
-        })
-        return
-    
-    # Check if game exists
-    game = await games_collection.find_one({'code': game_code})
-    if not game:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Game not found'}
-        })
-        return
-    
-    # Join live room
-    manager.join_live_room(connection_id, game_code)
-    
-    # Get current leaderboard
-    participants = await participants_collection.find(
-        {'game_code': game_code},
-        {'_id': 0}
-    ).sort('total_score', -1).to_list(length=None)
-    
-    await manager.send_to_connection(connection_id, {
-        'type': 'live_joined',
-        'data': {
-            'success': True,
-            'game': game,
-            'leaderboard': participants
-        }
-    })
-
-async def handle_submit_answer(connection_id: str, data: dict):
-    """Handle answer submission"""
-    participant_id = data.get('participant_id')
-    question_id = data.get('question_id')
-    answer = data.get('answer')
-    time_taken = data.get('time_taken', 0)
-    used_hint = data.get('used_hint', False)
-    
-    if not all([participant_id, question_id, answer is not None]):
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Missing required data'}
-        })
-        return
-    
+@api_router.post("/answers")
+async def submit_answer(data: SubmitAnswer):
+    """Submit an answer"""
     # Get participant and question
-    participant = await participants_collection.find_one({'id': participant_id})
-    question = await questions_collection.find_one({'id': question_id})
+    participant = await participants_collection.find_one({'id': data.participant_id})
+    question = await questions_collection.find_one({'id': data.question_id})
     
     if not participant or not question:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Participant or question not found'}
-        })
-        return
+        raise HTTPException(status_code=404, detail="Participant or question not found")
     
     # Check if already answered
     existing_answer = next(
-        (a for a in participant.get('answers', []) if a['question_id'] == question_id),
+        (a for a in participant.get('answers', []) if a['question_id'] == data.question_id),
         None
     )
     
     if existing_answer:
-        await manager.send_to_connection(connection_id, {
-            'type': 'error',
-            'data': {'message': 'Already answered this question'}
-        })
-        return
+        raise HTTPException(status_code=400, detail="Already answered this question")
     
     # Calculate score
     base_score = 100
-    time_bonus = max(0, 30 - time_taken) if time_taken < 30 else 0
-    hint_penalty = 15 if used_hint else 0
+    time_bonus = max(0, 30 - data.time_taken) if data.time_taken < 30 else 0
+    hint_penalty = 15 if data.used_hint else 0
     
     # Check if answer is correct
     is_correct = False
     if question['type'] == 'MCQ':
-        is_correct = answer == question['correct_answer']
+        is_correct = data.answer == question['correct_answer']
     elif question['type'] == 'TRUE_FALSE':
-        is_correct = str(answer).lower() == str(question['correct_answer']).lower()
+        is_correct = str(data.answer).lower() == str(question['correct_answer']).lower()
     elif question['type'] == 'INPUT':
-        is_correct = str(answer).lower().strip() == str(question['correct_answer']).lower().strip()
+        is_correct = str(data.answer).lower().strip() == str(question['correct_answer']).lower().strip()
     elif question['type'] == 'SCRAMBLED':
-        is_correct = str(answer).lower().strip() == str(question['correct_answer']).lower().strip()
+        is_correct = str(data.answer).lower().strip() == str(question['correct_answer']).lower().strip()
     
     score = (base_score + time_bonus - hint_penalty) if is_correct else 0
     
     # Create answer record
     answer_record = {
-        'question_id': question_id,
-        'answer': answer,
+        'question_id': data.question_id,
+        'answer': data.answer,
         'is_correct': is_correct,
         'score': score,
-        'time_taken': time_taken,
-        'used_hint': used_hint,
+        'time_taken': data.time_taken,
+        'used_hint': data.used_hint,
         'submitted_at': get_current_timestamp()
     }
     
     # Update participant
     await participants_collection.update_one(
-        {'id': participant_id},
+        {'id': data.participant_id},
         {
             '$push': {'answers': answer_record},
             '$inc': {'total_score': score}
@@ -591,94 +337,61 @@ async def handle_submit_answer(connection_id: str, data: dict):
     # Store answer in answers collection
     await answers_collection.insert_one({
         'id': str(uuid.uuid4()),
-        'participant_id': participant_id,
+        'participant_id': data.participant_id,
         'game_code': participant['game_code'],
-        'question_id': question_id,
-        'answer': answer,
+        'question_id': data.question_id,
+        'answer': data.answer,
         'is_correct': is_correct,
         'score': score,
-        'time_taken': time_taken,
-        'used_hint': used_hint,
+        'time_taken': data.time_taken,
+        'used_hint': data.used_hint,
         'submitted_at': get_current_timestamp()
     })
     
-    # Notify participant
-    await manager.send_to_connection(connection_id, {
-        'type': 'answer_submitted',
-        'data': {
-            'success': True,
-            'score': score,
-            'is_correct': is_correct
-        }
-    })
-    
-    # Update live leaderboard
-    updated_participant = await participants_collection.find_one({'id': participant_id}, {'_id': 0})
-    await manager.broadcast_to_live(participant['game_code'], {
-        'type': 'leaderboard_update',
-        'data': {'participant': updated_participant}
-    })
-    
-    # Notify admin
-    await manager.broadcast_to_admin(participant['game_code'], {
-        'type': 'answer_received',
-        'data': {
-            'participant_id': participant_id,
-            'question_id': question_id,
-            'answer': answer,
-            'is_correct': is_correct,
-            'score': score
-        }
-    })
+    return {
+        'success': True,
+        'score': score,
+        'is_correct': is_correct,
+        'total_score': participant['total_score'] + score
+    }
 
-async def handle_cheat_detected(connection_id: str, data: dict):
+@api_router.post("/cheat-detected")
+async def handle_cheat_detected(data: CheatDetection):
     """Handle cheat detection"""
-    participant_id = data.get('participant_id')
-    cheat_type = data.get('type')  # TAB_SWITCH, COPY_ATTEMPT, DEV_TOOLS
-    
-    if not participant_id or not cheat_type:
-        return
-    
-    participant = await participants_collection.find_one({'id': participant_id})
+    participant = await participants_collection.find_one({'id': data.participant_id})
     if not participant:
-        return
+        raise HTTPException(status_code=404, detail="Participant not found")
     
     # Log cheat attempt
     cheat_log = {
         'id': str(uuid.uuid4()),
-        'participant_id': participant_id,
+        'participant_id': data.participant_id,
         'game_code': participant['game_code'],
-        'type': cheat_type,
+        'type': data.type,
         'timestamp': get_current_timestamp(),
-        'details': data.get('details', {})
+        'details': data.details
     }
     
     await cheat_logs_collection.insert_one(cheat_log)
     
     # Update participant cheat flags
-    flag_key = f'cheat_flags.{cheat_type.lower()}s'
+    flag_key = f'cheat_flags.{data.type.lower()}s'
     await participants_collection.update_one(
-        {'id': participant_id},
+        {'id': data.participant_id},
         {'$inc': {flag_key: 1}}
     )
     
     # Apply penalty
-    penalty = 10 if cheat_type in ['TAB_SWITCH', 'COPY_ATTEMPT'] else 20
+    penalty = 10 if data.type in ['TAB_SWITCH', 'COPY_ATTEMPT'] else 20
     await participants_collection.update_one(
-        {'id': participant_id},
+        {'id': data.participant_id},
         {'$inc': {'total_score': -penalty}}
     )
     
-    # Notify admin
-    await manager.broadcast_to_admin(participant['game_code'], {
-        'type': 'cheat_detected',
-        'data': {
-            'participant_id': participant_id,
-            'type': cheat_type,
-            'penalty': penalty,
-            'timestamp': get_current_timestamp()
-        }
-    })
+    return {
+        'success': True,
+        'penalty': penalty
+    }
 
 # Include the API router
 app.include_router(api_router)
