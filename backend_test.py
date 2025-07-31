@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Comprehensive Backend Testing for Emotech Quiz Game
-Tests all major backend functionality including API endpoints, WebSocket connections, 
-game management, scoring system, and anti-cheat detection.
+Comprehensive Backend Testing for Emotech Quiz Game - REST API Implementation
+Tests all major backend functionality including API endpoints, participant management,
+answer submission, scoring system, and anti-cheat detection via REST endpoints.
 """
 
-import asyncio
 import json
 import requests
-import websockets
 import uuid
 import time
 from datetime import datetime
@@ -17,7 +15,6 @@ from typing import Dict, List, Optional
 # Configuration
 BACKEND_URL = "https://01c20ec6-6f32-4da6-b33e-28aa4ae0e92a.preview.emergentagent.com"
 API_BASE = f"{BACKEND_URL}/api"
-WS_BASE = BACKEND_URL.replace("https://", "wss://").replace("http://", "ws://")
 
 class BackendTester:
     def __init__(self):
@@ -212,6 +209,260 @@ class BackendTester:
             self.log_result("Retrieve Questions", False, f"Failed: {str(e)}")
             return False
 
+    def test_participant_creation(self):
+        """Test participant creation with duplicate name validation"""
+        if not self.game_code:
+            self.log_result("Participant Creation", False, "No game_code available")
+            return False
+            
+        try:
+            # Test creating first participant
+            participant_data = {
+                "game_code": self.game_code,
+                "name": "TechEnthusiast2025"
+            }
+            
+            response = self.session.post(f"{API_BASE}/participants", json=participant_data)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success') and data.get('participant'):
+                    participant = data['participant']
+                    self.participant_id = participant['id']
+                    self.log_result("Participant Creation - Valid", True, 
+                                  f"Participant created: {participant['name']}",
+                                  {'participant_id': self.participant_id, 'avatar': participant.get('avatar', 'N/A')})
+                    
+                    # Test duplicate name validation
+                    duplicate_response = self.session.post(f"{API_BASE}/participants", json=participant_data)
+                    
+                    if duplicate_response.status_code == 400:
+                        self.log_result("Participant Creation - Duplicate Name", True, "Correctly rejected duplicate name")
+                        
+                        # Test creating second participant with different name
+                        second_participant_data = {
+                            "game_code": self.game_code,
+                            "name": "CodeMaster2025"
+                        }
+                        
+                        second_response = self.session.post(f"{API_BASE}/participants", json=second_participant_data)
+                        
+                        if second_response.status_code == 200:
+                            second_data = second_response.json()
+                            if second_data.get('success'):
+                                self.log_result("Participant Creation - Second Participant", True, 
+                                              f"Second participant created: {second_data['participant']['name']}")
+                                return True
+                            else:
+                                self.log_result("Participant Creation - Second Participant", False, "Missing success flag")
+                                return False
+                        else:
+                            self.log_result("Participant Creation - Second Participant", False, f"Failed with status {second_response.status_code}")
+                            return False
+                    else:
+                        self.log_result("Participant Creation - Duplicate Name", False, "Should reject duplicate names")
+                        return False
+                else:
+                    self.log_result("Participant Creation - Valid", False, "Missing success flag or participant data")
+                    return False
+            else:
+                self.log_result("Participant Creation - Valid", False, f"Failed with status {response.status_code}")
+                return False
+                
+        except Exception as e:
+            self.log_result("Participant Creation", False, f"Test failed: {str(e)}")
+            return False
+
+    def test_answer_submission_and_scoring(self):
+        """Test answer submission and scoring system via REST API"""
+        if not self.participant_id or not self.question_ids:
+            self.log_result("Answer Submission & Scoring", False, "Missing participant_id or question_ids")
+            return False
+            
+        try:
+            # Test different answer scenarios
+            test_cases = [
+                {
+                    "question_id": self.question_ids[0],  # MCQ
+                    "answer": "Application Programming Interface",
+                    "time_taken": 10,
+                    "used_hint": False,
+                    "expected_correct": True,
+                    "expected_score": 120  # 100 base + 20 time bonus
+                },
+                {
+                    "question_id": self.question_ids[1],  # TRUE_FALSE
+                    "answer": "False",
+                    "time_taken": 25,
+                    "used_hint": True,
+                    "expected_correct": True,
+                    "expected_score": 90  # 100 base + 5 time bonus - 15 hint penalty
+                },
+                {
+                    "question_id": self.question_ids[2],  # INPUT
+                    "answer": "80",
+                    "time_taken": 15,
+                    "used_hint": False,
+                    "expected_correct": True,
+                    "expected_score": 115  # 100 base + 15 time bonus
+                },
+                {
+                    "question_id": self.question_ids[3],  # SCRAMBLED
+                    "answer": "DATABASE",
+                    "time_taken": 20,
+                    "used_hint": True,
+                    "expected_correct": True,
+                    "expected_score": 95  # 100 base + 10 time bonus - 15 hint penalty
+                }
+            ]
+            
+            total_expected_score = 0
+            
+            for i, test_case in enumerate(test_cases):
+                submit_data = {
+                    "participant_id": self.participant_id,
+                    "question_id": test_case["question_id"],
+                    "answer": test_case["answer"],
+                    "time_taken": test_case["time_taken"],
+                    "used_hint": test_case["used_hint"]
+                }
+                
+                response = self.session.post(f"{API_BASE}/answers", json=submit_data)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success'):
+                        is_correct = data.get('is_correct')
+                        score = data.get('score')
+                        total_score = data.get('total_score')
+                        
+                        if is_correct == test_case["expected_correct"]:
+                            total_expected_score += test_case["expected_score"]
+                            self.log_result(f"Answer Submission {i+1}", True, 
+                                          f"Correct: {is_correct}, Score: {score}, Total: {total_score}",
+                                          {'expected_score': test_case["expected_score"], 'actual_score': score})
+                        else:
+                            self.log_result(f"Answer Submission {i+1}", False, 
+                                          f"Expected correct: {test_case['expected_correct']}, got: {is_correct}")
+                    else:
+                        self.log_result(f"Answer Submission {i+1}", False, "Missing success flag")
+                else:
+                    self.log_result(f"Answer Submission {i+1}", False, f"Failed with status {response.status_code}")
+            
+            # Test duplicate answer submission
+            duplicate_data = {
+                "participant_id": self.participant_id,
+                "question_id": self.question_ids[0],
+                "answer": "Application Programming Interface",
+                "time_taken": 10,
+                "used_hint": False
+            }
+            
+            duplicate_response = self.session.post(f"{API_BASE}/answers", json=duplicate_data)
+            
+            if duplicate_response.status_code == 400:
+                self.log_result("Answer Submission - Duplicate Prevention", True, "Correctly prevented duplicate answer submission")
+            else:
+                self.log_result("Answer Submission - Duplicate Prevention", False, "Should prevent duplicate answers")
+            
+            # Verify total score via participants API
+            participants_response = self.session.get(f"{API_BASE}/games/{self.game_code}/participants")
+            if participants_response.status_code == 200:
+                participants_data = participants_response.json()
+                participants = participants_data.get('participants', [])
+                test_participant = next((p for p in participants if p['id'] == self.participant_id), None)
+                
+                if test_participant:
+                    actual_total = test_participant.get('total_score', 0)
+                    self.log_result("Scoring System Verification", True, 
+                                  f"Total score calculated correctly: {actual_total}",
+                                  {'expected_range': f"~{total_expected_score}", 'actual': actual_total})
+                    return True
+                else:
+                    self.log_result("Scoring System Verification", False, "Participant not found")
+                    return False
+            else:
+                self.log_result("Scoring System Verification", False, "Failed to retrieve participants")
+                return False
+                
+        except Exception as e:
+            self.log_result("Answer Submission & Scoring", False, f"Test failed: {str(e)}")
+            return False
+
+    def test_cheat_detection(self):
+        """Test anti-cheat detection system via REST API"""
+        if not self.participant_id:
+            self.log_result("Anti-Cheat Detection", False, "No participant_id available")
+            return False
+            
+        try:
+            # Test different cheat types
+            cheat_tests = [
+                {
+                    "type": "TAB_SWITCH",
+                    "details": {"timestamp": datetime.now().isoformat()}
+                },
+                {
+                    "type": "COPY_ATTEMPT", 
+                    "details": {"key_combination": "Ctrl+C"}
+                },
+                {
+                    "type": "DEV_TOOLS",
+                    "details": {"key_pressed": "F12"}
+                }
+            ]
+            
+            for cheat_test in cheat_tests:
+                cheat_data = {
+                    "participant_id": self.participant_id,
+                    "type": cheat_test["type"],
+                    "details": cheat_test["details"]
+                }
+                
+                response = self.session.post(f"{API_BASE}/cheat-detected", json=cheat_data)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get('success'):
+                        penalty = data.get('penalty', 0)
+                        self.log_result(f"Cheat Detection - {cheat_test['type']}", True, 
+                                      f"Cheat logged with penalty: {penalty}",
+                                      {'type': cheat_test['type'], 'penalty': penalty})
+                    else:
+                        self.log_result(f"Cheat Detection - {cheat_test['type']}", False, "Missing success flag")
+                else:
+                    self.log_result(f"Cheat Detection - {cheat_test['type']}", False, f"Failed with status {response.status_code}")
+            
+            # Verify cheat flags were updated
+            participants_response = self.session.get(f"{API_BASE}/games/{self.game_code}/participants")
+            if participants_response.status_code == 200:
+                participants_data = participants_response.json()
+                participants = participants_data.get('participants', [])
+                test_participant = next((p for p in participants if p['id'] == self.participant_id), None)
+                
+                if test_participant:
+                    cheat_flags = test_participant.get('cheat_flags', {})
+                    total_cheats = sum(cheat_flags.values())
+                    
+                    if total_cheats > 0:
+                        self.log_result("Anti-Cheat Verification", True, 
+                                      f"Cheat detection working - {total_cheats} violations recorded",
+                                      {'cheat_flags': cheat_flags})
+                        return True
+                    else:
+                        self.log_result("Anti-Cheat Verification", False, "No cheat flags recorded")
+                        return False
+                else:
+                    self.log_result("Anti-Cheat Verification", False, "Participant not found")
+                    return False
+            else:
+                self.log_result("Anti-Cheat Verification", False, "Failed to retrieve participants")
+                return False
+                
+        except Exception as e:
+            self.log_result("Anti-Cheat Detection", False, f"Test failed: {str(e)}")
+            return False
+
     def test_game_retrieval(self):
         """Test game retrieval"""
         if not self.game_code:
@@ -240,253 +491,32 @@ class BackendTester:
             self.log_result("Game Retrieval", False, f"Failed: {str(e)}")
             return False
 
-    async def test_websocket_connections(self):
-        """Test WebSocket connection functionality"""
+    def test_participants_retrieval(self):
+        """Test participants retrieval"""
         if not self.game_code:
-            self.log_result("WebSocket Connections", False, "No game_code available")
+            self.log_result("Participants Retrieval", False, "No game_code available")
             return False
             
         try:
-            connection_id = str(uuid.uuid4())
-            ws_url = f"{WS_BASE}/ws/{connection_id}"
+            response = self.session.get(f"{API_BASE}/games/{self.game_code}/participants")
             
-            async with websockets.connect(ws_url) as websocket:
-                # Test joining game as participant
-                join_message = {
-                    "type": "join_game",
-                    "data": {
-                        "game_code": self.game_code,
-                        "name": "TestParticipant2025"
-                    }
-                }
-                
-                await websocket.send(json.dumps(join_message))
-                
-                # Wait for response
-                response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                data = json.loads(response)
-                
-                if data.get('type') == 'joined_game' and data.get('data', {}).get('success'):
-                    participant_data = data['data']['participant']
-                    self.participant_id = participant_data['id']
-                    self.log_result("WebSocket - Join Game", True, 
-                                  f"Participant joined: {participant_data['name']}",
-                                  {'participant_id': self.participant_id})
-                    
-                    # Test admin connection
-                    admin_connection_id = str(uuid.uuid4())
-                    admin_ws_url = f"{WS_BASE}/ws/{admin_connection_id}"
-                    
-                    async with websockets.connect(admin_ws_url) as admin_ws:
-                        admin_join = {
-                            "type": "join_admin",
-                            "data": {
-                                "game_code": self.game_code,
-                                "organizer_id": self.organizer_id
-                            }
-                        }
-                        
-                        await admin_ws.send(json.dumps(admin_join))
-                        admin_response = await asyncio.wait_for(admin_ws.recv(), timeout=5.0)
-                        admin_data = json.loads(admin_response)
-                        
-                        if admin_data.get('type') == 'admin_joined' and admin_data.get('data', {}).get('success'):
-                            self.log_result("WebSocket - Admin Join", True, "Admin successfully joined")
-                            return True
-                        else:
-                            self.log_result("WebSocket - Admin Join", False, f"Admin join failed: {admin_data}")
-                            return False
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success') and 'participants' in data:
+                    participants = data['participants']
+                    self.log_result("Participants Retrieval", True, 
+                                  f"Retrieved {len(participants)} participants",
+                                  {'participant_count': len(participants)})
+                    return True
                 else:
-                    self.log_result("WebSocket - Join Game", False, f"Join failed: {data}")
+                    self.log_result("Participants Retrieval", False, "Missing success flag or participants data")
                     return False
-                    
-        except asyncio.TimeoutError:
-            self.log_result("WebSocket Connections", False, "WebSocket connection timed out")
-            return False
+            else:
+                self.log_result("Participants Retrieval", False, f"Failed with status {response.status_code}")
+                return False
+                
         except Exception as e:
-            self.log_result("WebSocket Connections", False, f"WebSocket test failed: {str(e)}")
-            return False
-
-    async def test_answer_submission_and_scoring(self):
-        """Test answer submission and scoring system"""
-        if not self.participant_id or not self.question_ids:
-            self.log_result("Answer Submission & Scoring", False, "Missing participant_id or question_ids")
-            return False
-            
-        try:
-            connection_id = str(uuid.uuid4())
-            ws_url = f"{WS_BASE}/ws/{connection_id}"
-            
-            async with websockets.connect(ws_url) as websocket:
-                # First rejoin as participant
-                join_message = {
-                    "type": "join_game",
-                    "data": {
-                        "game_code": self.game_code,
-                        "name": "TestParticipant2025"
-                    }
-                }
-                await websocket.send(json.dumps(join_message))
-                await websocket.recv()  # Consume join response
-                
-                # Test different answer scenarios
-                test_cases = [
-                    {
-                        "question_id": self.question_ids[0],  # MCQ
-                        "answer": "Application Programming Interface",
-                        "time_taken": 10,
-                        "used_hint": False,
-                        "expected_correct": True,
-                        "expected_score": 120  # 100 base + 20 time bonus
-                    },
-                    {
-                        "question_id": self.question_ids[1],  # TRUE_FALSE
-                        "answer": "False",
-                        "time_taken": 25,
-                        "used_hint": True,
-                        "expected_correct": True,
-                        "expected_score": 90  # 100 base + 5 time bonus - 15 hint penalty
-                    }
-                ]
-                
-                total_expected_score = 0
-                
-                for i, test_case in enumerate(test_cases):
-                    submit_message = {
-                        "type": "submit_answer",
-                        "data": {
-                            "participant_id": self.participant_id,
-                            "question_id": test_case["question_id"],
-                            "answer": test_case["answer"],
-                            "time_taken": test_case["time_taken"],
-                            "used_hint": test_case["used_hint"]
-                        }
-                    }
-                    
-                    await websocket.send(json.dumps(submit_message))
-                    response = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                    data = json.loads(response)
-                    
-                    if data.get('type') == 'answer_submitted':
-                        result = data.get('data', {})
-                        is_correct = result.get('is_correct')
-                        score = result.get('score')
-                        
-                        if is_correct == test_case["expected_correct"]:
-                            total_expected_score += test_case["expected_score"]
-                            self.log_result(f"Answer Submission {i+1}", True, 
-                                          f"Correct: {is_correct}, Score: {score}",
-                                          {'expected_score': test_case["expected_score"], 'actual_score': score})
-                        else:
-                            self.log_result(f"Answer Submission {i+1}", False, 
-                                          f"Expected correct: {test_case['expected_correct']}, got: {is_correct}")
-                    else:
-                        self.log_result(f"Answer Submission {i+1}", False, f"Unexpected response: {data}")
-                
-                # Verify total score via API
-                participants_response = self.session.get(f"{API_BASE}/games/{self.game_code}/participants")
-                if participants_response.status_code == 200:
-                    participants_data = participants_response.json()
-                    participants = participants_data.get('participants', [])
-                    test_participant = next((p for p in participants if p['id'] == self.participant_id), None)
-                    
-                    if test_participant:
-                        actual_total = test_participant.get('total_score', 0)
-                        self.log_result("Scoring System Verification", True, 
-                                      f"Total score calculated correctly: {actual_total}",
-                                      {'expected_range': f"~{total_expected_score}", 'actual': actual_total})
-                        return True
-                    else:
-                        self.log_result("Scoring System Verification", False, "Participant not found")
-                        return False
-                else:
-                    self.log_result("Scoring System Verification", False, "Failed to retrieve participants")
-                    return False
-                    
-        except Exception as e:
-            self.log_result("Answer Submission & Scoring", False, f"Test failed: {str(e)}")
-            return False
-
-    async def test_cheat_detection(self):
-        """Test anti-cheat detection system"""
-        if not self.participant_id:
-            self.log_result("Anti-Cheat Detection", False, "No participant_id available")
-            return False
-            
-        try:
-            connection_id = str(uuid.uuid4())
-            ws_url = f"{WS_BASE}/ws/{connection_id}"
-            
-            async with websockets.connect(ws_url) as websocket:
-                # Rejoin as participant
-                join_message = {
-                    "type": "join_game",
-                    "data": {
-                        "game_code": self.game_code,
-                        "name": "TestParticipant2025"
-                    }
-                }
-                await websocket.send(json.dumps(join_message))
-                await websocket.recv()  # Consume join response
-                
-                # Test different cheat types
-                cheat_tests = [
-                    {
-                        "type": "TAB_SWITCH",
-                        "details": {"timestamp": datetime.now().isoformat()}
-                    },
-                    {
-                        "type": "COPY_ATTEMPT", 
-                        "details": {"key_combination": "Ctrl+C"}
-                    },
-                    {
-                        "type": "DEV_TOOLS",
-                        "details": {"key_pressed": "F12"}
-                    }
-                ]
-                
-                for cheat_test in cheat_tests:
-                    cheat_message = {
-                        "type": "cheat_detected",
-                        "data": {
-                            "participant_id": self.participant_id,
-                            "type": cheat_test["type"],
-                            "details": cheat_test["details"]
-                        }
-                    }
-                    
-                    await websocket.send(json.dumps(cheat_message))
-                    # Note: Cheat detection doesn't send response to participant
-                    await asyncio.sleep(0.5)  # Give time for processing
-                
-                # Verify cheat flags were updated
-                participants_response = self.session.get(f"{API_BASE}/games/{self.game_code}/participants")
-                if participants_response.status_code == 200:
-                    participants_data = participants_response.json()
-                    participants = participants_data.get('participants', [])
-                    test_participant = next((p for p in participants if p['id'] == self.participant_id), None)
-                    
-                    if test_participant:
-                        cheat_flags = test_participant.get('cheat_flags', {})
-                        total_cheats = sum(cheat_flags.values())
-                        
-                        if total_cheats > 0:
-                            self.log_result("Anti-Cheat Detection", True, 
-                                          f"Cheat detection working - {total_cheats} violations recorded",
-                                          {'cheat_flags': cheat_flags})
-                            return True
-                        else:
-                            self.log_result("Anti-Cheat Detection", False, "No cheat flags recorded")
-                            return False
-                    else:
-                        self.log_result("Anti-Cheat Detection", False, "Participant not found")
-                        return False
-                else:
-                    self.log_result("Anti-Cheat Detection", False, "Failed to retrieve participants")
-                    return False
-                    
-        except Exception as e:
-            self.log_result("Anti-Cheat Detection", False, f"Test failed: {str(e)}")
+            self.log_result("Participants Retrieval", False, f"Test failed: {str(e)}")
             return False
 
     def test_leaderboard(self):
@@ -566,10 +596,10 @@ class BackendTester:
             self.log_result("Game Start", False, f"Test failed: {str(e)}")
             return False
 
-    async def run_all_tests(self):
+    def run_all_tests(self):
         """Run all backend tests"""
-        print("🚀 Starting Emotech Quiz Game Backend Tests")
-        print("=" * 60)
+        print("🚀 Starting Emotech Quiz Game Backend Tests - REST API Implementation")
+        print("=" * 70)
         
         # API Tests
         print("\n📡 Testing API Endpoints...")
@@ -579,21 +609,22 @@ class BackendTester:
         question_mgmt = self.test_question_management()
         game_retrieval = self.test_game_retrieval()
         
-        # WebSocket Tests
-        print("\n🔌 Testing WebSocket Connections...")
-        websocket_test = await self.test_websocket_connections()
+        # Participant Management Tests
+        print("\n👥 Testing Participant Management...")
+        participant_creation = self.test_participant_creation()
+        participants_retrieval = self.test_participants_retrieval()
         
         # Game Flow Tests
         print("\n🎮 Testing Game Flow...")
-        scoring_test = await self.test_answer_submission_and_scoring()
-        cheat_test = await self.test_cheat_detection()
+        scoring_test = self.test_answer_submission_and_scoring()
+        cheat_test = self.test_cheat_detection()
         leaderboard_test = self.test_leaderboard()
         game_start_test = self.test_game_start()
         
         # Summary
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 70)
         print("📊 TEST SUMMARY")
-        print("=" * 60)
+        print("=" * 70)
         
         total_tests = len(self.test_results)
         passed_tests = sum(1 for result in self.test_results.values() if result['success'])
@@ -614,7 +645,7 @@ class BackendTester:
             "Organizer Login - Valid", 
             "Game Creation",
             "Add Question - MCQ",
-            "WebSocket - Join Game",
+            "Participant Creation - Valid",
             "Answer Submission 1",
             "Leaderboard"
         ]
@@ -631,13 +662,13 @@ class BackendTester:
             'results': self.test_results
         }
 
-async def main():
+def main():
     """Main test execution"""
     tester = BackendTester()
-    results = await tester.run_all_tests()
+    results = tester.run_all_tests()
     
     # Return results for programmatic access
     return results
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
