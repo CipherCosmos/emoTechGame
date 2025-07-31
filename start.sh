@@ -7,7 +7,7 @@ export PORT=${PORT:-3000}
 sed -i "s/listen 3000;/listen $PORT;/" /etc/nginx/conf.d/default.conf
 
 # Start backend in background
-cd /app/backend && uvicorn server:app --host 0.0.0.0 --port 8001 --reload &
+cd /app/backend && python3 -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload &
 
 # Start nginx
 nginx -g "daemon off;" 

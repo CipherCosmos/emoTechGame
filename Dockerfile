@@ -44,12 +44,12 @@ COPY backend/ ./
 # Final stage - Nginx to serve both frontend and backend
 FROM nginx:alpine
 
-# Install Python runtime for backend
+# Install Python runtime and dependencies for backend
 RUN apk add --no-cache python3 py3-pip curl
 
-# Copy Python dependencies from backend stage
-COPY --from=backend-builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
-COPY --from=backend-builder /usr/local/bin /usr/local/bin
+# Copy backend requirements and install Python dependencies
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # Copy built frontend from frontend stage
 COPY --from=frontend-builder /app/frontend/build /usr/share/nginx/html
