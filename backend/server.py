@@ -419,7 +419,7 @@ async def handle_join_game(connection_id: str, data: dict):
         'type': 'joined_game',
         'data': {
             'success': True,
-            'participant': participant,
+            'participant': participant_response,
             'game': game
         }
     })
@@ -427,7 +427,7 @@ async def handle_join_game(connection_id: str, data: dict):
     # Notify admin
     await manager.broadcast_to_admin(game_code, {
         'type': 'participant_joined',
-        'data': {'participant': participant}
+        'data': {'participant': participant_response}
     })
 
 async def handle_join_admin(connection_id: str, data: dict):
