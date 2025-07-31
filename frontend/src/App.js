@@ -780,50 +780,40 @@ const GameLobby = () => {
   const [isJoining, setIsJoining] = useState(false);
 
   useEffect(() => {
-    setupWebSocket();
-  }, []);
-
-  const setupWebSocket = async () => {
-    try {
-      const ws = getWebSocketManager();
-      await ws.connect();
-
-      ws.on('joined_game', (data) => {
-        if (data.success) {
-          setParticipant(data.participant);
-          setGame(data.game);
-          toast.success('Joined game successfully!');
-          setIsJoining(false);
+    // Check game status periodically
+    pollingManager.startPolling('game_status', async () => {
+      try {
+        const response = await axios.get(`${API}/games/${code}`);
+        if (response.data.success) {
+          const gameData = response.data.game;
+          setGame(gameData);
+          
+          if (gameData.status === 'in_progress' && participant) {
+            setGameStarted(true);
+            pollingManager.stopPolling('game_status');
+          }
         }
-      });
+      } catch (error) {
+        // Game might not exist yet, ignore error
+      }
+    }, 3000);
 
-      ws.on('game_started', (data) => {
-        setGameStarted(true);
-        toast.success('Game has started!');
-      });
-
-      ws.on('error', (data) => {
-        toast.error(data.message);
-        setIsJoining(false);
-      });
-
-    } catch (error) {
-      toast.error('Failed to connect to game server');
-    }
-  };
+    return () => {
+      pollingManager.stopPolling('game_status');
+    };
+  }, [code, participant]);
 
   // Anti-cheat detection
   useEffect(() => {
     if (!participant) return;
 
-    const ws = getWebSocketManager();
-
     const handleVisibilityChange = () => {
       if (document.hidden && participant) {
-        ws.send('cheat_detected', {
+        // Send cheat detection via API instead of WebSocket
+        axios.post(`${API}/cheat-detected`, {
           participant_id: participant.id,
           type: 'TAB_SWITCH'
-        });
+        }).catch(() => {}); // Ignore errors
       }
     };
 
@@ -833,20 +823,20 @@ const GameLobby = () => {
         e.key === 'F12'
       )) {
         e.preventDefault();
-        ws.send('cheat_detected', {
+        axios.post(`${API}/cheat-detected`, {
           participant_id: participant.id,
           type: 'DEV_TOOLS'
-        });
+        }).catch(() => {});
       }
     };
 
     const handleContextMenu = (e) => {
       if (participant) {
         e.preventDefault();
-        ws.send('cheat_detected', {
+        axios.post(`${API}/cheat-detected`, {
           participant_id: participant.id,
           type: 'COPY_ATTEMPT'
-        });
+        }).catch(() => {});
       }
     };
 
@@ -861,15 +851,31 @@ const GameLobby = () => {
     };
   }, [participant]);
 
-  const joinGame = (e) => {
+  const joinGame = async (e) => {
     e.preventDefault();
     if (participantName.trim()) {
       setIsJoining(true);
-      const ws = getWebSocketManager();
-      ws.send('join_game', {
-        game_code: code,
-        name: participantName.trim()
-      });
+      
+      try {
+        // Create participant via REST API
+        const response = await axios.post(`${API}/participants`, {
+          game_code: code,
+          name: participantName.trim()
+        });
+
+        if (response.data.success) {
+          setParticipant(response.data.participant);
+          setGame(response.data.game);
+          toast.success('Joined game successfully!');
+        } else {
+          toast.error(response.data.message || 'Failed to join game');
+        }
+      } catch (error) {
+        const message = error.response?.data?.detail || error.response?.data?.message || 'Failed to join game';
+        toast.error(message);
+      } finally {
+        setIsJoining(false);
+      }
     }
   };
 
