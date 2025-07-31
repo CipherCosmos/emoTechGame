@@ -8,108 +8,44 @@ import './App.css';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
-const WS_URL = BACKEND_URL.replace('https://', 'wss://').replace('http://', 'ws://');
 
-// WebSocket connection manager
-class WebSocketManager {
+// Polling-based real-time communication manager
+class PollingManager {
   constructor() {
-    this.ws = null;
-    this.connectionId = null;
-    this.messageHandlers = new Map();
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 5;
+    this.intervals = new Map();
+    this.callbacks = new Map();
   }
 
-  connect() {
-    return new Promise((resolve, reject) => {
-      try {
-        this.connectionId = `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        this.ws = new WebSocket(`${WS_URL}/ws/${this.connectionId}`);
-
-        this.ws.onopen = () => {
-          console.log('WebSocket connected');
-          this.reconnectAttempts = 0;
-          resolve();
-        };
-
-        this.ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data);
-            this.handleMessage(message);
-          } catch (error) {
-            console.error('Error parsing WebSocket message:', error);
-          }
-        };
-
-        this.ws.onclose = () => {
-          console.log('WebSocket disconnected');
-          this.attemptReconnect();
-        };
-
-        this.ws.onerror = (error) => {
-          console.error('WebSocket error:', error);
-          reject(error);
-        };
-      } catch (error) {
-        reject(error);
-      }
-    });
+  startPolling(key, callback, intervalMs = 2000) {
+    // Clear existing polling for this key
+    this.stopPolling(key);
+    
+    this.callbacks.set(key, callback);
+    const intervalId = setInterval(callback, intervalMs);
+    this.intervals.set(key, intervalId);
+    
+    // Execute immediately
+    callback();
   }
 
-  attemptReconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      console.log(`Attempting to reconnect... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-      
-      setTimeout(() => {
-        this.connect().catch(() => {
-          console.log('Reconnection failed');
-        });
-      }, 2000 * this.reconnectAttempts);
+  stopPolling(key) {
+    const intervalId = this.intervals.get(key);
+    if (intervalId) {
+      clearInterval(intervalId);
+      this.intervals.delete(key);
+      this.callbacks.delete(key);
     }
   }
 
-  send(type, data) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type, data }));
-    } else {
-      console.error('WebSocket is not connected');
+  stopAllPolling() {
+    for (const [key] of this.intervals) {
+      this.stopPolling(key);
     }
-  }
-
-  on(type, handler) {
-    this.messageHandlers.set(type, handler);
-  }
-
-  off(type) {
-    this.messageHandlers.delete(type);
-  }
-
-  handleMessage(message) {
-    const handler = this.messageHandlers.get(message.type);
-    if (handler) {
-      handler(message.data);
-    }
-  }
-
-  disconnect() {
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
-    this.messageHandlers.clear();
   }
 }
 
-// Global WebSocket instance
-let wsManager = null;
-
-const getWebSocketManager = () => {
-  if (!wsManager) {
-    wsManager = new WebSocketManager();
-  }
-  return wsManager;
-};
+// Global polling manager
+const pollingManager = new PollingManager();
 
 // Home Page
 const HomePage = () => {
