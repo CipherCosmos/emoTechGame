@@ -136,7 +136,10 @@ const HomePage = () => {
       <div className="relative overflow-hidden">
         {/* Animated Background */}
         <div className="absolute inset-0 bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 dark:from-gray-900 dark:via-purple-900 dark:to-indigo-900">
-          <div className="absolute inset-0 bg-[url('data:image/svg+xml,%3Csvg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg"%3E%3Cg fill="none" fill-rule="evenodd"%3E%3Cg fill="%239C92AC" fill-opacity="0.1"%3E%3Ccircle cx="7" cy="7" r="1"/%3E%3C/g%3E%3C/g%3E%3C/svg%3E')] opacity-20"></div>
+          <div className="absolute inset-0 opacity-20">
+            <div className="absolute top-0 left-0 w-full h-full bg-purple-800/10 rounded-full blur-3xl animate-pulse"></div>
+            <div className="absolute bottom-0 right-0 w-2/3 h-2/3 bg-blue-800/10 rounded-full blur-3xl animate-pulse delay-1000"></div>
+          </div>
         </div>
 
         {/* Header */}
