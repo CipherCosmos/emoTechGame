@@ -414,7 +414,22 @@ const GameManagement = () => {
     }
 
     fetchGameData();
-    setupWebSocket();
+    
+    // Poll for participant updates
+    pollingManager.startPolling('participants', async () => {
+      try {
+        const response = await axios.get(`${API}/games/${code}/participants`);
+        if (response.data.success) {
+          setParticipants(response.data.participants);
+        }
+      } catch (error) {
+        console.error('Error fetching participants:', error);
+      }
+    }, 3000);
+
+    return () => {
+      pollingManager.stopPolling('participants');
+    };
   }, [code, organizerId, navigate]);
 
   const fetchGameData = async () => {
@@ -436,36 +451,6 @@ const GameManagement = () => {
       }
     } catch (error) {
       toast.error('Failed to load game data');
-    }
-  };
-
-  const setupWebSocket = async () => {
-    try {
-      const ws = getWebSocketManager();
-      await ws.connect();
-
-      ws.on('participant_joined', (data) => {
-        setParticipants(prev => [...prev, data.participant]);
-        toast.success(`${data.participant.name} joined the game`);
-      });
-
-      ws.on('answer_received', (data) => {
-        toast.info(`Answer received from participant`);
-      });
-
-      ws.on('cheat_detected', (data) => {
-        toast.error(`Cheat detected: ${data.type} (Penalty: -${data.penalty})`);
-      });
-
-      // Join admin room
-      ws.send('join_admin', {
-        game_code: code,
-        organizer_id: organizerId
-      });
-
-    } catch (error) {
-      console.error('WebSocket connection failed:', error);
-      toast.error('Real-time connection failed');
     }
   };
 
