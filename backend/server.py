@@ -227,9 +227,14 @@ async def add_question(game_code: str, data: CreateQuestion):
     
     await questions_collection.insert_one(question)
     
+    # Remove MongoDB ObjectId for JSON serialization
+    question_response = dict(question)
+    if '_id' in question_response:
+        del question_response['_id']
+    
     return {
         'success': True,
-        'question': question
+        'question': question_response
     }
 
 @api_router.get("/games/{game_code}/questions")
