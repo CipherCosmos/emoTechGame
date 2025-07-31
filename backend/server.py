@@ -406,6 +406,11 @@ async def handle_join_game(connection_id: str, data: dict):
     # Store in database
     await participants_collection.insert_one(participant)
     
+    # Remove MongoDB ObjectId for JSON serialization
+    participant_response = dict(participant)
+    if '_id' in participant_response:
+        del participant_response['_id']
+    
     # Join game room
     manager.join_game_room(connection_id, game_code)
     
