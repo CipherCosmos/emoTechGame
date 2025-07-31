@@ -60,12 +60,9 @@ COPY --from=backend-builder /app/backend /app/backend
 # Copy custom nginx configuration for Railway
 COPY docker/nginx/nginx-railway.conf /etc/nginx/conf.d/default.conf
 
-# Create startup script
-RUN echo '#!/bin/sh\n\
-# Start backend in background\n\
-cd /app/backend && uvicorn server:app --host 0.0.0.0 --port 8001 --reload &\n\
-# Start nginx\n\
-nginx -g "daemon off;"' > /start.sh && chmod +x /start.sh
+# Copy startup script
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
 # Expose port (Railway will set the PORT environment variable)
 EXPOSE 3000 8001

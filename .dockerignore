@@ -59,6 +59,9 @@ docker-compose*
 # Railway
 Railway.toml
 
+# Keep startup script
+!start.sh
+
 # Logs
 logs/
 *.log
