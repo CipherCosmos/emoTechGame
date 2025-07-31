@@ -19,7 +19,8 @@ async def test_websocket_debug():
     print(f"Attempting to connect to: {ws_url}")
     
     try:
-        async with websockets.connect(ws_url, timeout=10) as websocket:
+        # Use connect with proper timeout handling for newer websockets library
+        async with websockets.connect(ws_url) as websocket:
             print("✅ WebSocket connection established!")
             
             # Test basic message
