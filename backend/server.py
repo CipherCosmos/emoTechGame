@@ -401,7 +401,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://emotech.vercel.app",
+        "https://emotechv1.vercel.app",
         "https://emotech-6jlt.onrender.com",
+        "https://emotechv1.onrender.com",
         "http://localhost:3000",  # For local development
         "http://localhost:8001",  # For local development
     ],
